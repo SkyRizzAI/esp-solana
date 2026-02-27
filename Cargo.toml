@@ -1,0 +1,19 @@
+[package]
+name = "esp-solana"
+version = "0.1.0"
+edition = "2021"
+description = "Compact no_std Solana SDK for ESP32 microcontrollers"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+ed25519-compact = { version = "2.1", default-features = false, optional = true }
+
+[features]
+default = ["crypto"]
+crypto = ["dep:ed25519-compact"]
+std = []
+
+[dev-dependencies]
