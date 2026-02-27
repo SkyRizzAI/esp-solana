@@ -1,9 +1,11 @@
 [package]
 name = "esp-solana"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "Compact no_std Solana SDK for ESP32 microcontrollers"
 license = "MIT"
+authors = ["Riz"]
 repository = "https://github.com/SkyRizzAI/esp-solana"
 keywords = ["solana", "esp32", "no-std", "embedded", "blockchain"]
 categories = ["no-std", "embedded", "cryptography"]
@@ -14,6 +16,10 @@ exclude = [
     "target/",
     ".github/",
 ]
+
+[package.metadata.docs.rs]
+features = ["wallet"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 crate-type = ["rlib"]

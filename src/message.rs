@@ -32,7 +32,7 @@ pub struct Message {
 impl Message {
     /// Compile a message from high-level instructions.
     ///
-    /// - `payer` is always account_keys[0] and a signer.
+    /// - `payer` is always `account_keys\[0\]` and a signer.
     /// - De-duplicates pubkeys across all instructions.
     /// - Orders: writable signers, readonly signers, writable non-signers, readonly non-signers.
     pub fn compile(

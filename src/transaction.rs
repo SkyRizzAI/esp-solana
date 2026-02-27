@@ -16,7 +16,7 @@ impl Transaction {
     /// Create and sign a transaction.
     ///
     /// `signers` must be ordered to match the message's required signers:
-    /// signers[0] = payer, then any additional signers in account_keys order.
+    /// `signers\[0\]` = payer, then any additional signers in account_keys order.
     #[cfg(feature = "crypto")]
     pub fn new(message: Message, signers: &[&crate::crypto::Keypair]) -> Result<Self> {
         let expected = message.header.num_required_signatures as usize;
