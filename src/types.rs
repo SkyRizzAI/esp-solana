@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::fmt;
 
 /// 32-byte Solana public key.
@@ -19,6 +20,17 @@ impl Pubkey {
     pub const fn system_program() -> Self {
         Self([0u8; 32])
     }
+
+    /// Create from a base58 string.
+    pub fn from_bs58(s: &str) -> Result<Self> {
+        let bytes = crate::bs58::decode_32(s)?;
+        Ok(Self(bytes))
+    }
+
+    /// Encode as base58 string.
+    pub fn to_bs58(&self) -> alloc::string::String {
+        crate::bs58::encode(&self.0)
+    }
 }
 
 impl AsRef<[u8]> for Pubkey {
@@ -29,13 +41,13 @@ impl AsRef<[u8]> for Pubkey {
 
 impl fmt::Debug for Pubkey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Show first 4 and last 4 bytes in hex for brevity
-        write!(
-            f,
-            "Pubkey({:02x}{:02x}{:02x}{:02x}..{:02x}{:02x}{:02x}{:02x})",
-            self.0[0], self.0[1], self.0[2], self.0[3],
-            self.0[28], self.0[29], self.0[30], self.0[31]
-        )
+        write!(f, "Pubkey({})", crate::bs58::encode(&self.0))
+    }
+}
+
+impl fmt::Display for Pubkey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", crate::bs58::encode(&self.0))
     }
 }
 
@@ -61,11 +73,13 @@ impl AsRef<[u8]> for Hash {
 
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Hash({:02x}{:02x}{:02x}{:02x}..)",
-            self.0[0], self.0[1], self.0[2], self.0[3]
-        )
+        write!(f, "Hash({})", crate::bs58::encode(&self.0))
+    }
+}
+
+impl fmt::Display for Hash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", crate::bs58::encode(&self.0))
     }
 }
 
@@ -99,11 +113,13 @@ impl Default for Signature {
 
 impl fmt::Debug for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Sig({:02x}{:02x}{:02x}{:02x}..)",
-            self.0[0], self.0[1], self.0[2], self.0[3]
-        )
+        write!(f, "Sig({})", crate::bs58::encode(&self.0))
+    }
+}
+
+impl fmt::Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", crate::bs58::encode(&self.0))
     }
 }
 
@@ -144,3 +160,21 @@ impl fmt::Display for SdkError {
 }
 
 pub type Result<T> = core::result::Result<T, SdkError>;
+
+/// Write a Solana compact-u16 (1–3 byte variable-length encoding) into `buf`.
+pub fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
+    loop {
+        let mut byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if val > 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if val == 0 {
+            break;
+        }
+    }
+}
+
+/// Maximum number of accounts in a single Solana transaction.
+pub const MAX_ACCOUNTS: usize = 255;

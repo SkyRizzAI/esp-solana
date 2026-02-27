@@ -99,21 +99,17 @@ pub fn json_get_account_info(pubkey_b58: &str) -> String {
 
 // ─── Response Parsers ────────────────────────────────────────
 // Minimal JSON parsing without serde — searches for known keys.
+// Handles optional whitespace around `:` and values.
 
 /// Parse `getLatestBlockhash` response to extract the 32-byte hash.
 ///
 /// Expected shape: `{"result":{"context":...,"value":{"blockhash":"<base58>", ...}}}`
 pub fn parse_blockhash(json: &str) -> Result<Hash> {
-    // Check for RPC error
-    if json.contains("\"error\"") {
-        return Err(SdkError::Rpc);
+    if let Some(err) = extract_rpc_error(json) {
+        return Err(err);
     }
 
-    let key = "\"blockhash\":\"";
-    let start = json.find(key).ok_or(SdkError::Deserialize)? + key.len();
-    let end = json[start..].find('"').ok_or(SdkError::Deserialize)? + start;
-    let b58_str = &json[start..end];
-
+    let b58_str = extract_string_value(json, "blockhash")?;
     let bytes = crate::bs58::decode_32(b58_str)?;
     Ok(Hash::new(bytes))
 }
@@ -122,37 +118,97 @@ pub fn parse_blockhash(json: &str) -> Result<Hash> {
 ///
 /// Expected shape: `{"result":{"context":...,"value":12345}}`
 pub fn parse_balance(json: &str) -> Result<u64> {
-    if json.contains("\"error\"") {
-        return Err(SdkError::Rpc);
+    if let Some(err) = extract_rpc_error(json) {
+        return Err(err);
     }
 
-    let key = "\"value\":";
-    let start = json.find(key).ok_or(SdkError::Deserialize)? + key.len();
+    // Find "value" key — for getBalance it's a number, could also be null
+    let key = "\"value\"";
+    let key_pos = json.find(key).ok_or(SdkError::Deserialize)?;
+    let after_key = &json[key_pos + key.len()..];
 
-    // Find the number (skip whitespace, read digits)
-    let remaining = &json[start..];
-    let num_start = remaining.find(|c: char| c.is_ascii_digit()).ok_or(SdkError::Deserialize)?;
-    let num_end = remaining[num_start..]
+    // Skip whitespace and colon
+    let after_colon = skip_ws_colon(after_key)?;
+
+    // Check for null
+    if after_colon.starts_with("null") {
+        return Ok(0);
+    }
+
+    // Read digits
+    let num_start = after_colon
+        .find(|c: char| c.is_ascii_digit())
+        .ok_or(SdkError::Deserialize)?;
+    let num_end = after_colon[num_start..]
         .find(|c: char| !c.is_ascii_digit())
         .map(|i| num_start + i)
-        .unwrap_or(remaining.len());
+        .unwrap_or(after_colon.len());
 
-    let num_str = &remaining[num_start..num_end];
-    parse_u64(num_str)
+    parse_u64(&after_colon[num_start..num_end])
 }
 
 /// Parse a JSON-RPC response where the result is a string (e.g., sendTransaction signature).
 ///
 /// Expected shape: `{"result":"<signature_string>"}`
 pub fn parse_string_result(json: &str) -> Result<String> {
-    if json.contains("\"error\"") {
-        return Err(SdkError::Rpc);
+    if let Some(err) = extract_rpc_error(json) {
+        return Err(err);
     }
 
-    let key = "\"result\":\"";
-    let start = json.find(key).ok_or(SdkError::Deserialize)? + key.len();
-    let end = json[start..].find('"').ok_or(SdkError::Deserialize)? + start;
-    Ok(String::from(&json[start..end]))
+    let val = extract_string_value(json, "result")?;
+    Ok(String::from(val))
+}
+
+/// Extract a JSON string value for a given key, handling optional whitespace.
+/// Finds `"key" : "value"` and returns the inner value (without quotes).
+fn extract_string_value<'a>(json: &'a str, key: &str) -> Result<&'a str> {
+    // Build pattern: "key"
+    let mut search = String::with_capacity(key.len() + 2);
+    search.push('"');
+    search.push_str(key);
+    search.push('"');
+
+    let key_pos = json.find(search.as_str()).ok_or(SdkError::Deserialize)?;
+    let after_key = &json[key_pos + search.len()..];
+
+    // Skip whitespace and colon
+    let after_colon = skip_ws_colon(after_key)?;
+
+    // Skip whitespace before opening quote
+    let trimmed = after_colon.trim_start();
+    if !trimmed.starts_with('"') {
+        return Err(SdkError::Deserialize);
+    }
+
+    let value_start = 1; // skip opening quote
+    let value_end = trimmed[value_start..]
+        .find('"')
+        .ok_or(SdkError::Deserialize)?;
+
+    Ok(&trimmed[value_start..value_start + value_end])
+}
+
+/// Skip optional whitespace then a colon then optional whitespace.
+fn skip_ws_colon(s: &str) -> Result<&str> {
+    let s = s.trim_start();
+    if !s.starts_with(':') {
+        return Err(SdkError::Deserialize);
+    }
+    Ok(s[1..].trim_start())
+}
+
+/// Check for a JSON-RPC error and return the appropriate SdkError.
+fn extract_rpc_error(json: &str) -> Option<SdkError> {
+    // Look for "error" as a top-level key (not inside a string value)
+    let key = "\"error\"";
+    if let Some(pos) = json.find(key) {
+        // Make sure it's preceded by `{` or `,` (possibly with whitespace), not inside a string
+        let before = json[..pos].trim_end();
+        if before.ends_with('{') || before.ends_with(',') {
+            return Some(SdkError::Rpc);
+        }
+    }
+    None
 }
 
 /// Parse a decimal string to u64 without pulling in std.
@@ -200,6 +256,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_blockhash_with_whitespace() {
+        // Some RPC servers send pretty-printed JSON
+        let json = r#"{"jsonrpc": "2.0", "result": {"context": {"slot": 123}, "value": {"blockhash" : "11111111111111111111111111111111", "lastValidBlockHeight": 456}}, "id": 1}"#;
+        let hash = parse_blockhash(json).unwrap();
+        assert_eq!(hash, Hash::new([0u8; 32]));
+    }
+
+    #[test]
     fn parse_blockhash_error() {
         let json = r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"bad"},"id":1}"#;
         assert!(parse_blockhash(json).is_err());
@@ -217,6 +281,21 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":0},"id":1}"#;
         let balance = parse_balance(json).unwrap();
         assert_eq!(balance, 0);
+    }
+
+    #[test]
+    fn parse_balance_null() {
+        // Account doesn't exist — value is null
+        let json = r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":null},"id":1}"#;
+        let balance = parse_balance(json).unwrap();
+        assert_eq!(balance, 0);
+    }
+
+    #[test]
+    fn parse_balance_with_whitespace() {
+        let json = r#"{"jsonrpc" : "2.0", "result" : {"context" : {"slot" : 1}, "value" : 999}, "id" : 1}"#;
+        let balance = parse_balance(json).unwrap();
+        assert_eq!(balance, 999);
     }
 
     #[test]

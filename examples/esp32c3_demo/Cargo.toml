@@ -1,0 +1,14 @@
+[package]
+name = "esp32c3-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esp-solana = { path = "../..", features = ["crypto"] }
+
+# ESP32-C3 HAL and WiFi
+esp-hal = { version = "0.23", features = ["esp32c3"] }
+esp-wifi = { version = "0.13", features = ["esp32c3", "wifi", "utils"] }
+esp-alloc = "0.7"
+esp-println = { version = "0.13", features = ["esp32c3", "log"] }
+log = "0.4"

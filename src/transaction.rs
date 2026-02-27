@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use alloc::string::String;
-use crate::types::{Signature, SdkError, Result};
+use crate::types::{Signature, SdkError, Result, write_compact_u16};
 use crate::message::Message;
 
 /// A signed Solana transaction ready for submission.
@@ -22,6 +22,13 @@ impl Transaction {
         let expected = message.header.num_required_signatures as usize;
         if signers.len() != expected {
             return Err(SdkError::Invalid);
+        }
+
+        // Validate that each signer's pubkey matches the corresponding account_key
+        for (i, kp) in signers.iter().enumerate() {
+            if kp.pubkey() != message.account_keys[i] {
+                return Err(SdkError::Crypto);
+            }
         }
 
         let msg_bytes = message.serialize();
@@ -64,21 +71,6 @@ impl Transaction {
     /// Serialize and base64-encode for RPC `sendTransaction`.
     pub fn to_base64(&self) -> String {
         crate::b64::encode(&self.serialize())
-    }
-}
-
-/// Write a Solana compact-u16.
-fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
-    loop {
-        let mut byte = (val & 0x7F) as u8;
-        val >>= 7;
-        if val > 0 {
-            byte |= 0x80;
-        }
-        buf.push(byte);
-        if val == 0 {
-            break;
-        }
     }
 }
 

@@ -1,7 +1,7 @@
 //! Solana message compilation and wire-format serialization.
 
 use alloc::vec::Vec;
-use crate::types::{Pubkey, Hash, SdkError, Result};
+use crate::types::{Pubkey, Hash, SdkError, Result, write_compact_u16, MAX_ACCOUNTS};
 use crate::instruction::Instruction;
 
 /// Compiled instruction with indices into the message's account_keys array.
@@ -95,6 +95,11 @@ impl Message {
         let num_signers = 1 + writable_signers.len() + readonly_signers.len();
         let num_readonly_signed = readonly_signers.len();
         let num_readonly_unsigned = readonly_nonsigners.len();
+        let total_accounts = num_signers + writable_nonsigners.len() + readonly_nonsigners.len();
+
+        if total_accounts > MAX_ACCOUNTS {
+            return Err(SdkError::Invalid);
+        }
 
         let mut account_keys = Vec::with_capacity(keys.len());
         account_keys.push(payer_entry.0);
@@ -184,25 +189,11 @@ impl Message {
     }
 }
 
-/// Write a Solana compact-u16 (1-3 byte variable-length encoding).
-fn write_compact_u16(buf: &mut Vec<u8>, mut val: u16) {
-    loop {
-        let mut byte = (val & 0x7F) as u8;
-        val >>= 7;
-        if val > 0 {
-            byte |= 0x80;
-        }
-        buf.push(byte);
-        if val == 0 {
-            break;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::instruction::system_transfer;
+    use crate::types::write_compact_u16;
 
     #[test]
     fn compact_u16_encoding() {
