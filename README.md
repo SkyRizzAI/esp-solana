@@ -2,7 +2,7 @@
 
 A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, build messages, read on-chain state, manage wallets, and submit RPC requests — all from bare-metal Rust.
 
-**~298 KB** release rlib (with wallet). **Only 2** external dependencies. **Zero** hardware dependencies — bring your own networking.
+**~163 KB** flash image on ESP32-C3 (with wallet, only 4% of 4MB flash). **Only 2** external dependencies. **Zero** hardware dependencies — bring your own networking.
 
 ## Features
 
@@ -11,7 +11,7 @@ A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, bu
 | **Ed25519 signing** | Keypair generation, transaction signing, signature verification |
 | **Transaction building** | Compile instructions → Solana wire format, exact byte-level compatibility |
 | **Wallet management** | BIP39 mnemonic generation/validation, SLIP-10 HD key derivation, multi-account, zeroize-on-drop |
-| **RPC client** | Transport-agnostic JSON-RPC for `getLatestBlockhash`, `sendTransaction`, `getBalance`, `getAccountInfo` |
+| **RPC client** | Transport-agnostic JSON-RPC: `getBalance`, `getLatestBlockhash`, `sendTransaction`, `getAccountInfo`, `requestAirdrop`, `getSignatureStatuses`, `getTransaction` |
 | **Base58 / Base64** | Built-in codecs, no external dependencies |
 | **System program** | SOL transfer instruction builder |
 
@@ -170,10 +170,11 @@ runner = "espflash flash --monitor"
 ```toml
 [dependencies]
 esp-solana = { path = "../esp-solana", features = ["wallet"] }
-esp-hal = { version = "0.23", features = ["esp32c3"] }
-esp-wifi = { version = "0.13", features = ["esp32c3", "wifi"] }
-esp-alloc = "0.7"
-esp-println = { version = "0.13", features = ["esp32c3", "log"] }
+esp-hal = { version = "~1.0", features = ["esp32c3"] }
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32c3"] }
+esp-alloc = "0.9"
+esp-println = { version = "0.16", features = ["esp32c3"] }
+critical-section = "1.2"
 ```
 
 ### Heap allocator
@@ -181,14 +182,8 @@ esp-println = { version = "0.13", features = ["esp32c3", "log"] }
 ESP32-C3 needs a heap allocator for `alloc`. Add this to your `main()`:
 
 ```rust
-const HEAP_SIZE: usize = 131072; // 128KB for wallet + transactions
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-unsafe {
-    esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-        HEAP.as_mut_ptr(), HEAP_SIZE,
-        esp_alloc::MemoryCapability::Internal,
-    ));
-}
+// 64KB heap — enough for wallet + transaction operations
+esp_alloc::heap_allocator!(size: 65536);
 ```
 
 ### Implementing the HTTP transport
@@ -226,34 +221,44 @@ cargo run --example host_demo --features crypto
 cargo run --example host_demo --features wallet
 ```
 
+### Devnet transfer (real on-chain transaction)
+
+```bash
+# Creates wallets, airdrops SOL, transfers, verifies — all on Solana devnet
+cargo run --example devnet_transfer --features wallet
+```
+
 Output:
 ```
-=== esp-solana Host Demo ===
+Step 1: Create two wallets
+  Wallet A address: A5detG9omcKkzEU4sVV5DNTAZTrTUvxeSuBr2KYvGupR
+  Wallet B address: B62WCu72GVByU2T6PvUWWmrYPoek5qseAAB2XZW39bLB
 
-Payer pubkey: 2iXtA8oeZqUU5pofxK971TCEvFGfems2AcDRaZHKD2pQ
-Recipient:    11111111111111111111111111111112
+Step 4: Build & sign transfer (0.1 SOL: A → B)
+  Signature: LGFUJZrsHx...
+  Wire size: 215 bytes
 
-Payer balance: 5000000000 lamports (5 SOL)
-Blockhash:    GWWjbfFnZkEqjVh8sMz5HFkpJLaRqfNG3P3fX7aEbCE9
+Step 5: Send transaction to devnet
+  ✓ Transaction sent!
 
-Transfer:     1000000 lamports → 11111111111111111111111111111112
-Signature:    2suTHPgyh5vxu87gymj5thW182eoZYt4qgyKz84VCEGBg8bR1uCRy9B4MuRLn39ZhJz1AePgy9jnTrzAdeb4gMBs
-Wire size:    215 bytes
-
-Tx sent!      5VERv8NMhbf3stL4VKdZXzK12xJGQRP2WQGLNfgfB2aD
-
-=== Demo complete ===
+Step 7: Final balances
+  Wallet A: 699985000 lamports (0.7000 SOL)
+  Wallet B: 300000000 lamports (0.3000 SOL)
 ```
 
-### ESP32-C3 demo (embedded)
-
-See [`examples/esp32c3_demo/`](examples/esp32c3_demo/) for a complete project scaffold with WiFi setup, keypair loading, and RPC integration.
+### ESP32-C3 demo (runs on real hardware)
 
 ```bash
 cd examples/esp32c3_demo
-cargo +esp build --release
-espflash flash target/riscv32imc-unknown-none-elf/release/esp32c3-demo --monitor
+cargo +stable build --release
+espflash flash target/riscv32imc-unknown-none-elf/release/esp32c3-solana-demo --monitor
 ```
+
+The ESP32-C3 demo creates wallets, builds and signs a transaction, and prepares
+RPC request bodies — all running offline on the microcontroller. To send real
+transactions, implement `RpcClient` with your WiFi/networking stack.
+
+See [`examples/esp32c3_demo/`](examples/esp32c3_demo/) for the complete project.
 
 ## Cargo Features
 
@@ -333,6 +338,10 @@ Use `Transaction::new_with_signatures()` to attach pre-computed signatures.
 - `SolanaRpc::send_transaction(b64)` → `Result<String>`
 - `SolanaRpc::get_balance(pubkey)` → `Result<u64>`
 - `SolanaRpc::get_account_info(pubkey)` → `Result<String>`
+- `SolanaRpc::request_airdrop(pubkey, lamports)` → `Result<String>` — devnet/testnet airdrop
+- `SolanaRpc::get_signature_status(sig)` → `Result<String>` — confirmation status
+- `SolanaRpc::get_transaction(sig)` → `Result<String>` — detailed transaction info
+- `SolanaRpc::check_confirmation(sig)` → `Result<bool>` — poll for confirmation
 
 ### `bs58` / `b64`
 - `bs58::encode(&[u8])` → `String`
@@ -341,13 +350,43 @@ Use `Transaction::new_with_signatures()` to attach pre-computed signatures.
 - `b64::encode(&[u8])` → `String`
 - `b64::decode(&str)` → `Result<Vec<u8>>`
 
-## Binary Size (RISC-V 32-bit release rlib)
+## Binary Size
 
-| Config | Size | Dependencies |
-|--------|------|-------------|
-| `wallet` | ~298 KB | 2 (ed25519-compact, hmac-sha256/512) |
-| `crypto` only | ~163 KB | 1 (ed25519-compact) |
-| no features | ~145 KB | 0 |
+### Actual ESP32-C3 Flash Image (with LTO, `opt-level = 's'`)
+
+| Configuration | Flash Size | % of 4MB |
+|---------------|-----------|----------|
+| Bare ESP32-C3 (empty app) | 71 KB | 1.7% |
+| + esp-solana `crypto` (signing + tx + rpc) | 148 KB | 3.7% |
+| + esp-solana `wallet` (full SDK) | **163 KB** | **4.0%** |
+| + esp-println (demo output) | 197 KB | 4.9% |
+
+### Component Overhead
+
+| Component | Adds |
+|-----------|------|
+| Ed25519 signing + transaction + RPC | ~79 KB |
+| Wallet (BIP39 + SLIP-10 + wordlist) | ~15 KB |
+| esp-println (optional, for serial output) | ~34 KB |
+
+### Size Tips
+
+Use these `Cargo.toml` profile settings for smallest binaries:
+```toml
+[profile.release]
+codegen-units = 1
+lto           = 'fat'
+opt-level     = 's'     # or 'z' for minimum size
+overflow-checks = false
+```
+
+### RISC-V rlib Size (before LTO)
+
+| Config | rlib Size | Dependencies |
+|--------|-----------|-------------|
+| `wallet` | ~315 KB | 2 (ed25519-compact, hmac-sha256/512) |
+| `crypto` only | ~186 KB | 1 (ed25519-compact) |
+| no features | ~186 KB | 0 |
 
 ## Security
 
