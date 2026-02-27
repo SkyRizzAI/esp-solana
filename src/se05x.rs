@@ -72,6 +72,8 @@ mod p1 {
     pub const KEY_PAIR: u8 = 0x60;
     /// Signature operation.
     pub const SIGNATURE: u8 = 0x21;
+    /// Default / none.
+    pub const DEFAULT: u8 = 0x00;
 }
 
 /// P2 variants.
@@ -371,7 +373,7 @@ where
         tlv_push(&mut tlv, &mut pos, tag::CURVE, &[0x00, 0x00]);
 
         let (apdu, alen) =
-            Self::build_apdu(ins::READ, p2::DEFAULT, p2::DEFAULT, &tlv[..pos]);
+            Self::build_apdu(ins::READ, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
         let (rsp, rsp_len) = self.send_apdu(&apdu[..alen])?;
 
         // Response contains TLV with the public key
@@ -438,7 +440,7 @@ where
         tlv_push(&mut tlv, &mut pos, tag::OBJ_ID, &id_bytes);
 
         let (apdu, alen) =
-            Self::build_apdu(ins::MGMT, p2::DEFAULT, p2::DEFAULT, &tlv[..pos]);
+            Self::build_apdu(ins::MGMT, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
         self.send_apdu(&apdu[..alen])?;
         self.pubkey = Pubkey::new([0u8; 32]);
         Ok(())
