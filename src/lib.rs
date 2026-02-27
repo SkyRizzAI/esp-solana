@@ -93,5 +93,5 @@ pub mod prelude {
     pub use crate::bip39::Mnemonic;
 
     #[cfg(feature = "se05x")]
-    pub use crate::se05x::Se05xSigner;
+    pub use crate::se05x::{Se05xSigner, Se05xWallet};
 }

@@ -205,6 +205,21 @@ fn parse_frame(buf: &[u8], len: usize) -> Result<&[u8]> {
     Ok(&buf[3..3 + payload_len])
 }
 
+// ── APDU builder ─────────────────────────────────────────────────────
+
+/// Build an APDU: CLA INS P1 P2 Lc <data…>
+fn build_apdu(ins: u8, p1: u8, p2: u8, data: &[u8]) -> ([u8; MAX_RSP], usize) {
+    let mut buf = [0u8; MAX_RSP];
+    buf[0] = CLA;
+    buf[1] = ins;
+    buf[2] = p1;
+    buf[3] = p2;
+    let len = 5 + data.len();
+    buf[4] = data.len() as u8;
+    buf[5..5 + data.len()].copy_from_slice(data);
+    (buf, len)
+}
+
 // ── SE05x driver ─────────────────────────────────────────────────────
 
 /// NXP SE05x secure-element signer.
@@ -315,21 +330,6 @@ where
         Ok((out, data_len))
     }
 
-    // ── APDU builders ────────────────────────────────────────────────
-
-    /// Build an APDU: CLA INS P1 P2 Lc <data…>
-    fn build_apdu(ins: u8, p1: u8, p2: u8, data: &[u8]) -> ([u8; MAX_RSP], usize) {
-        let mut buf = [0u8; MAX_RSP];
-        buf[0] = CLA;
-        buf[1] = ins;
-        buf[2] = p1;
-        buf[3] = p2;
-        let len = 5 + data.len();
-        buf[4] = data.len() as u8;
-        buf[5..5 + data.len()].copy_from_slice(data);
-        (buf, len)
-    }
-
     // ── public API ───────────────────────────────────────────────────
 
     /// Generate a new Ed25519 key pair inside the secure element.
@@ -346,7 +346,7 @@ where
         tlv_push(&mut tlv, &mut pos, tag::CURVE, &[CURVE_ED25519]);
 
         let (apdu, alen) =
-            Self::build_apdu(ins::WRITE, p1::EC | p1::KEY_PAIR, p2::GENERATE, &tlv[..pos]);
+            build_apdu(ins::WRITE, p1::EC | p1::KEY_PAIR, p2::GENERATE, &tlv[..pos]);
         self.send_apdu(&apdu[..alen])?;
 
         // Read back the public key
@@ -373,7 +373,7 @@ where
         tlv_push(&mut tlv, &mut pos, tag::CURVE, &[0x00, 0x00]);
 
         let (apdu, alen) =
-            Self::build_apdu(ins::READ, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
+            build_apdu(ins::READ, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
         let (rsp, rsp_len) = self.send_apdu(&apdu[..alen])?;
 
         // Response contains TLV with the public key
@@ -411,7 +411,7 @@ where
         tlv_push(&mut tlv, &mut pos, tag::DATA, message);
 
         let (apdu, alen) =
-            Self::build_apdu(ins::CRYPTO, p1::SIGNATURE, p2::EDDSA, &tlv[..pos]);
+            build_apdu(ins::CRYPTO, p1::SIGNATURE, p2::EDDSA, &tlv[..pos]);
         let (rsp, rsp_len) = self.send_apdu(&apdu[..alen])?;
 
         // Response contains the 64-byte Ed25519 signature
@@ -440,7 +440,7 @@ where
         tlv_push(&mut tlv, &mut pos, tag::OBJ_ID, &id_bytes);
 
         let (apdu, alen) =
-            Self::build_apdu(ins::MGMT, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
+            build_apdu(ins::MGMT, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
         self.send_apdu(&apdu[..alen])?;
         self.pubkey = Pubkey::new([0u8; 32]);
         Ok(())
@@ -462,6 +462,303 @@ where
 
     fn sign(&self, message: &[u8]) -> Result<Signature> {
         self.sign_message(message)
+    }
+}
+
+// ── SE05x wallet ─────────────────────────────────────────────────────
+
+/// Maximum number of accounts managed by an [`Se05xWallet`].
+pub const SE05X_MAX_ACCOUNTS: usize = 8;
+
+/// NXP SE05x-backed hardware wallet.
+///
+/// Maps Solana-style account indices (`0`, `1`, `2`, …) to SE05x object
+/// IDs and caches the corresponding Ed25519 public keys.  All key
+/// generation, storage, and signing happen inside the secure element —
+/// private key material never leaves the chip.
+///
+/// # Object-ID mapping
+///
+/// Account `n` is stored at SE05x object ID `base_id + n`.  Choose a
+/// `base_id` that does not collide with other objects on the SE05x
+/// (e.g., `0x0001_0000`).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use esp_solana::se05x::{Se05xWallet, Se05xWalletAccount};
+/// use esp_solana::signer::Signer;
+/// use esp_solana::transaction::Transaction;
+///
+/// let mut wallet = Se05xWallet::new(i2c, 0x0001_0000);
+/// let pk = wallet.create_account(0)?;          // generate key in SE
+///
+/// let signer = wallet.signer(0)?;
+/// let tx = Transaction::sign(msg, &[&signer])?;
+/// ```
+pub struct Se05xWallet<I2C> {
+    inner: core::cell::UnsafeCell<Se05xInner<I2C>>,
+    base_id: u32,
+    accounts: [Option<Pubkey>; SE05X_MAX_ACCOUNTS],
+}
+
+impl<I2C, E> Se05xWallet<I2C>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+{
+    /// Create a new SE05x-backed wallet.
+    ///
+    /// `base_id` is the starting SE05x object identifier.  Account `n`
+    /// maps to object ID `base_id + n`.
+    pub fn new(i2c: I2C, base_id: u32) -> Self {
+        Self {
+            inner: core::cell::UnsafeCell::new(Se05xInner {
+                i2c,
+                addr: I2C_ADDR,
+                seq: 0,
+            }),
+            base_id,
+            accounts: [None; SE05X_MAX_ACCOUNTS],
+        }
+    }
+
+    /// Override the default I²C address (0x48).
+    pub fn with_address(self, addr: u8) -> Self {
+        // SAFETY: exclusive access during construction
+        unsafe { &mut *self.inner.get() }.addr = addr;
+        self
+    }
+
+    fn inner_mut(&self) -> &mut Se05xInner<I2C> {
+        unsafe { &mut *self.inner.get() }
+    }
+
+    fn key_id(&self, account: u32) -> Result<u32> {
+        if account as usize >= SE05X_MAX_ACCOUNTS {
+            return Err(SdkError::Invalid);
+        }
+        self.base_id.checked_add(account).ok_or(SdkError::Invalid)
+    }
+
+    // ── I²C transport ────────────────────────────────────────────────
+
+    fn transceive(&self, apdu: &[u8]) -> Result<([u8; MAX_RSP], usize)> {
+        let inner = self.inner_mut();
+        let mut tx_buf = [0u8; MAX_RSP];
+        let tx_len = frame_iblock(apdu, inner.seq, &mut tx_buf);
+        inner.seq = inner.seq.wrapping_add(1);
+
+        inner.i2c
+            .write(inner.addr, &tx_buf[..tx_len])
+            .map_err(|_| SdkError::Network)?;
+
+        let mut rx_buf = [0u8; MAX_RSP];
+        inner.i2c
+            .read(inner.addr, &mut rx_buf)
+            .map_err(|_| SdkError::Network)?;
+
+        if rx_buf.len() < 4 {
+            return Err(SdkError::Deserialize);
+        }
+        let payload_len = rx_buf[2] as usize;
+        let frame_len = 3 + payload_len + 1;
+        Ok((rx_buf, frame_len))
+    }
+
+    fn send_apdu(&self, apdu: &[u8]) -> Result<([u8; MAX_RSP], usize)> {
+        let (rx_buf, frame_len) = self.transceive(apdu)?;
+        let payload = parse_frame(&rx_buf, frame_len)?;
+
+        if payload.len() < 2 {
+            return Err(SdkError::Deserialize);
+        }
+
+        let sw = ((payload[payload.len() - 2] as u16) << 8)
+            | payload[payload.len() - 1] as u16;
+        if sw != SW_SUCCESS {
+            return Err(SdkError::Crypto);
+        }
+
+        let data_len = payload.len() - 2;
+        let mut out = [0u8; MAX_RSP];
+        out[..data_len].copy_from_slice(&payload[..data_len]);
+        Ok((out, data_len))
+    }
+
+    // ── wallet API ───────────────────────────────────────────────────
+
+    /// Generate a new Ed25519 key pair inside the SE for `account`.
+    ///
+    /// Returns the public key.  Overwrites any existing key at that slot.
+    pub fn create_account(&mut self, account: u32) -> Result<Pubkey> {
+        let kid = self.key_id(account)?;
+
+        let mut tlv = [0u8; 16];
+        let mut pos = 0;
+        let id_bytes = kid.to_be_bytes();
+        tlv_push(&mut tlv, &mut pos, tag::OBJ_ID, &id_bytes);
+        tlv_push(&mut tlv, &mut pos, tag::CURVE, &[CURVE_ED25519]);
+
+        let (apdu, alen) =
+            build_apdu(ins::WRITE, p1::EC | p1::KEY_PAIR, p2::GENERATE, &tlv[..pos]);
+        self.send_apdu(&apdu[..alen])?;
+
+        let pk = self.read_key(kid)?;
+        self.accounts[account as usize] = Some(pk);
+        Ok(pk)
+    }
+
+    /// Load an existing account from the SE (reads the public key).
+    ///
+    /// Call this for keys that were previously created with
+    /// [`create_account`](Self::create_account) and are still stored
+    /// on the secure element.
+    pub fn load_account(&mut self, account: u32) -> Result<Pubkey> {
+        let kid = self.key_id(account)?;
+        let pk = self.read_key(kid)?;
+        self.accounts[account as usize] = Some(pk);
+        Ok(pk)
+    }
+
+    /// Delete an account's key from the SE.
+    pub fn delete_account(&mut self, account: u32) -> Result<()> {
+        let kid = self.key_id(account)?;
+
+        let mut tlv = [0u8; 8];
+        let mut pos = 0;
+        let id_bytes = kid.to_be_bytes();
+        tlv_push(&mut tlv, &mut pos, tag::OBJ_ID, &id_bytes);
+
+        let (apdu, alen) =
+            build_apdu(ins::MGMT, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
+        self.send_apdu(&apdu[..alen])?;
+
+        self.accounts[account as usize] = None;
+        Ok(())
+    }
+
+    /// Return the cached public key for `account`, if loaded.
+    pub fn pubkey(&self, account: u32) -> Result<Pubkey> {
+        if account as usize >= SE05X_MAX_ACCOUNTS {
+            return Err(SdkError::Invalid);
+        }
+        self.accounts[account as usize].ok_or(SdkError::Invalid)
+    }
+
+    /// Return the default (account 0) public key.
+    pub fn default_pubkey(&self) -> Result<Pubkey> {
+        self.pubkey(0)
+    }
+
+    /// Sign `message` using the key at `account`.
+    pub fn sign_with(&self, account: u32, message: &[u8]) -> Result<Signature> {
+        let kid = self.key_id(account)?;
+        self.sign_key(kid, message)
+    }
+
+    /// Return a lightweight [`Signer`] handle for `account`.
+    ///
+    /// The returned handle borrows this wallet and can be passed to
+    /// [`Transaction::sign`](crate::transaction::Transaction::sign).
+    pub fn signer(&self, account: u32) -> Result<Se05xWalletAccount<'_, I2C>> {
+        let pk = self.pubkey(account)?;
+        let kid = self.key_id(account)?;
+        Ok(Se05xWalletAccount {
+            wallet: self,
+            pubkey: pk,
+            key_id: kid,
+        })
+    }
+
+    /// Number of loaded (cached) accounts.
+    pub fn account_count(&self) -> usize {
+        self.accounts.iter().filter(|a| a.is_some()).count()
+    }
+
+    /// Return the underlying I²C bus.
+    pub fn release(self) -> I2C {
+        self.inner.into_inner().i2c
+    }
+
+    // ── internal SE commands ─────────────────────────────────────────
+
+    fn read_key(&self, kid: u32) -> Result<Pubkey> {
+        let mut tlv = [0u8; 16];
+        let mut pos = 0;
+        let id_bytes = kid.to_be_bytes();
+        tlv_push(&mut tlv, &mut pos, tag::OBJ_ID, &id_bytes);
+        tlv_push(&mut tlv, &mut pos, tag::OFFSET, &[0x00, 0x00]);
+        tlv_push(&mut tlv, &mut pos, tag::CURVE, &[0x00, 0x00]);
+
+        let (apdu, alen) =
+            build_apdu(ins::READ, p1::DEFAULT, p2::DEFAULT, &tlv[..pos]);
+        let (rsp, rsp_len) = self.send_apdu(&apdu[..alen])?;
+
+        let data = &rsp[..rsp_len];
+        let mut p = 0;
+        while p < data.len() {
+            let (t, val) = tlv_parse(data, &mut p)?;
+            if t == tag::DATA {
+                if val.len() != 32 {
+                    return Err(SdkError::Crypto);
+                }
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(val);
+                return Ok(Pubkey::new(pk));
+            }
+        }
+        Err(SdkError::Deserialize)
+    }
+
+    fn sign_key(&self, kid: u32, message: &[u8]) -> Result<Signature> {
+        let mut tlv = [0u8; MAX_RSP];
+        let mut pos = 0;
+        let id_bytes = kid.to_be_bytes();
+        tlv_push(&mut tlv, &mut pos, tag::OBJ_ID, &id_bytes);
+        tlv_push(&mut tlv, &mut pos, tag::DATA, message);
+
+        let (apdu, alen) =
+            build_apdu(ins::CRYPTO, p1::SIGNATURE, p2::EDDSA, &tlv[..pos]);
+        let (rsp, rsp_len) = self.send_apdu(&apdu[..alen])?;
+
+        let data = &rsp[..rsp_len];
+        let mut p = 0;
+        while p < data.len() {
+            let (t, val) = tlv_parse(data, &mut p)?;
+            if t == tag::DATA {
+                if val.len() != 64 {
+                    return Err(SdkError::Crypto);
+                }
+                let mut sig = [0u8; 64];
+                sig.copy_from_slice(val);
+                return Ok(Signature::new(sig));
+            }
+        }
+        Err(SdkError::Deserialize)
+    }
+}
+
+/// Lightweight signer handle for a single account in an [`Se05xWallet`].
+///
+/// Implements [`Signer`] so it can be passed directly to
+/// [`Transaction::sign`](crate::transaction::Transaction::sign).
+/// Borrows the parent wallet; signing still happens on-chip in the SE05x.
+pub struct Se05xWalletAccount<'w, I2C> {
+    wallet: &'w Se05xWallet<I2C>,
+    pubkey: Pubkey,
+    key_id: u32,
+}
+
+impl<I2C, E> Signer for Se05xWalletAccount<'_, I2C>
+where
+    I2C: embedded_hal::i2c::I2c<Error = E>,
+{
+    fn pubkey(&self) -> Pubkey {
+        self.pubkey
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<Signature> {
+        self.wallet.sign_key(self.key_id, message)
     }
 }
 
@@ -567,7 +864,7 @@ mod tests {
     #[test]
     fn build_apdu_structure() {
         let data = [0x41, 0x04, 0x00, 0x01, 0x00, 0x01];
-        let (buf, len) = Se05xSigner::<MockI2c>::build_apdu(ins::WRITE, p1::EC | p1::KEY_PAIR, p2::GENERATE, &data);
+        let (buf, len) = build_apdu(ins::WRITE, p1::EC | p1::KEY_PAIR, p2::GENERATE, &data);
         assert_eq!(buf[0], CLA);
         assert_eq!(buf[1], ins::WRITE);
         assert_eq!(buf[2], p1::EC | p1::KEY_PAIR);
@@ -735,5 +1032,190 @@ mod tests {
         let mock = MockI2c::new(alloc::vec![frame]);
         let mut signer = Se05xSigner::new(mock, 0x0001_0001);
         assert!(signer.read_public_key().is_err());
+    }
+
+    // ── Se05xWallet tests ────────────────────────────────────────────
+
+    #[test]
+    fn wallet_new_defaults() {
+        let mock = MockI2c::new(alloc::vec::Vec::new());
+        let wallet = Se05xWallet::new(mock, 0x0001_0000);
+        assert_eq!(wallet.base_id, 0x0001_0000);
+        assert_eq!(wallet.account_count(), 0);
+        assert!(wallet.pubkey(0).is_err());
+    }
+
+    #[test]
+    fn wallet_create_account() {
+        // create_account sends a generate APDU (write) then a read-pubkey APDU.
+        // Mock: first call pair for generate (write+read → SW 9000),
+        //       second call pair for read_key (write+read → TLV pubkey + SW 9000).
+        let gen_ok = mock_frame(&[0x90, 0x00]);
+
+        let fake_pk = [0x42u8; 32];
+        let mut read_rsp = alloc::vec::Vec::new();
+        read_rsp.push(tag::DATA);
+        read_rsp.push(32);
+        read_rsp.extend_from_slice(&fake_pk);
+        read_rsp.push(0x90);
+        read_rsp.push(0x00);
+        let read_ok = mock_frame(&read_rsp);
+
+        let mock = MockI2c::new(alloc::vec![gen_ok, read_ok]);
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        let pk = wallet.create_account(0).unwrap();
+        assert_eq!(pk, Pubkey::new(fake_pk));
+        assert_eq!(wallet.account_count(), 1);
+        assert_eq!(wallet.default_pubkey().unwrap(), pk);
+    }
+
+    #[test]
+    fn wallet_load_account() {
+        let fake_pk = [0xAB; 32];
+        let mut read_rsp = alloc::vec::Vec::new();
+        read_rsp.push(tag::DATA);
+        read_rsp.push(32);
+        read_rsp.extend_from_slice(&fake_pk);
+        read_rsp.push(0x90);
+        read_rsp.push(0x00);
+        let read_ok = mock_frame(&read_rsp);
+
+        let mock = MockI2c::new(alloc::vec![read_ok]);
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        let pk = wallet.load_account(0).unwrap();
+        assert_eq!(pk, Pubkey::new(fake_pk));
+        assert_eq!(wallet.account_count(), 1);
+    }
+
+    #[test]
+    fn wallet_delete_account() {
+        // Pre-load an account, then delete it.
+        let fake_pk = [0x11; 32];
+        let mut read_rsp = alloc::vec::Vec::new();
+        read_rsp.push(tag::DATA);
+        read_rsp.push(32);
+        read_rsp.extend_from_slice(&fake_pk);
+        read_rsp.push(0x90);
+        read_rsp.push(0x00);
+        let read_ok = mock_frame(&read_rsp);
+        let del_ok = mock_frame(&[0x90, 0x00]);
+
+        let mock = MockI2c::new(alloc::vec![read_ok, del_ok]);
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        wallet.load_account(0).unwrap();
+        assert_eq!(wallet.account_count(), 1);
+
+        wallet.delete_account(0).unwrap();
+        assert_eq!(wallet.account_count(), 0);
+        assert!(wallet.pubkey(0).is_err());
+    }
+
+    #[test]
+    fn wallet_sign_with() {
+        // Load an account, then sign.
+        let fake_pk = [0x22; 32];
+        let mut read_rsp = alloc::vec::Vec::new();
+        read_rsp.push(tag::DATA);
+        read_rsp.push(32);
+        read_rsp.extend_from_slice(&fake_pk);
+        read_rsp.push(0x90);
+        read_rsp.push(0x00);
+        let read_ok = mock_frame(&read_rsp);
+
+        let fake_sig = [0xCC; 64];
+        let mut sig_rsp = alloc::vec::Vec::new();
+        sig_rsp.push(tag::DATA);
+        sig_rsp.push(64);
+        sig_rsp.extend_from_slice(&fake_sig);
+        sig_rsp.push(0x90);
+        sig_rsp.push(0x00);
+        let sig_ok = mock_frame(&sig_rsp);
+
+        let mock = MockI2c::new(alloc::vec![read_ok, sig_ok]);
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        wallet.load_account(0).unwrap();
+
+        let sig = wallet.sign_with(0, b"hello").unwrap();
+        assert_eq!(sig, Signature::new(fake_sig));
+    }
+
+    #[test]
+    fn wallet_signer_trait() {
+        use crate::signer::Signer;
+
+        let fake_pk = [0x33; 32];
+        let mut read_rsp = alloc::vec::Vec::new();
+        read_rsp.push(tag::DATA);
+        read_rsp.push(32);
+        read_rsp.extend_from_slice(&fake_pk);
+        read_rsp.push(0x90);
+        read_rsp.push(0x00);
+        let read_ok = mock_frame(&read_rsp);
+
+        let fake_sig = [0xDD; 64];
+        let mut sig_rsp = alloc::vec::Vec::new();
+        sig_rsp.push(tag::DATA);
+        sig_rsp.push(64);
+        sig_rsp.extend_from_slice(&fake_sig);
+        sig_rsp.push(0x90);
+        sig_rsp.push(0x00);
+        let sig_ok = mock_frame(&sig_rsp);
+
+        let mock = MockI2c::new(alloc::vec![read_ok, sig_ok]);
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        wallet.load_account(0).unwrap();
+
+        let acct = wallet.signer(0).unwrap();
+        assert_eq!(acct.pubkey(), Pubkey::new(fake_pk));
+        let sig = acct.sign(b"test").unwrap();
+        assert_eq!(sig, Signature::new(fake_sig));
+    }
+
+    #[test]
+    fn wallet_invalid_account_index() {
+        let mock = MockI2c::new(alloc::vec::Vec::new());
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        assert!(wallet.pubkey(SE05X_MAX_ACCOUNTS as u32).is_err());
+        // Cannot create at index >= MAX
+        assert!(wallet.create_account(SE05X_MAX_ACCOUNTS as u32).is_err());
+    }
+
+    #[test]
+    fn wallet_multiple_accounts() {
+        // Load two different accounts with different pubkeys.
+        let pk0 = [0x01; 32];
+        let pk1 = [0x02; 32];
+
+        let mut rsp0 = alloc::vec::Vec::new();
+        rsp0.push(tag::DATA);
+        rsp0.push(32);
+        rsp0.extend_from_slice(&pk0);
+        rsp0.push(0x90);
+        rsp0.push(0x00);
+
+        let mut rsp1 = alloc::vec::Vec::new();
+        rsp1.push(tag::DATA);
+        rsp1.push(32);
+        rsp1.extend_from_slice(&pk1);
+        rsp1.push(0x90);
+        rsp1.push(0x00);
+
+        let mock = MockI2c::new(alloc::vec![mock_frame(&rsp0), mock_frame(&rsp1)]);
+        let mut wallet = Se05xWallet::new(mock, 0x0001_0000);
+        wallet.load_account(0).unwrap();
+        wallet.load_account(1).unwrap();
+
+        assert_eq!(wallet.account_count(), 2);
+        assert_eq!(wallet.pubkey(0).unwrap(), Pubkey::new(pk0));
+        assert_eq!(wallet.pubkey(1).unwrap(), Pubkey::new(pk1));
+        assert_ne!(wallet.pubkey(0).unwrap(), wallet.pubkey(1).unwrap());
+    }
+
+    #[test]
+    fn wallet_custom_address() {
+        let mock = MockI2c::new(alloc::vec::Vec::new());
+        let wallet = Se05xWallet::new(mock, 0x0001_0000).with_address(0x50);
+        let inner = unsafe { &*wallet.inner.get() };
+        assert_eq!(inner.addr, 0x50);
     }
 }
