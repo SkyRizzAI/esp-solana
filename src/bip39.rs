@@ -6,7 +6,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::types::{SdkError, Result};
-use crate::wordlist::WORDLIST;
+use crate::wordlist;
 
 /// A validated BIP39 mnemonic phrase.
 #[derive(Clone)]
@@ -77,10 +77,10 @@ impl Mnemonic {
                 }
             }
 
-            if (index as usize) >= WORDLIST.len() {
+            if (index as usize) >= 2048 {
                 return Err(SdkError::Invalid);
             }
-            words.push(WORDLIST[index as usize]);
+            words.push(wordlist::get_word(index as usize).ok_or(SdkError::Invalid)?);
         }
 
         let phrase = words.join(" ");
@@ -102,7 +102,7 @@ impl Mnemonic {
         // Look up each word's index
         let mut indices = Vec::with_capacity(word_count);
         for word in &words {
-            let idx = WORDLIST.iter().position(|w| w == word)
+            let idx = wordlist::find_word(word)
                 .ok_or(SdkError::Invalid)?;
             indices.push(idx as u16);
         }
