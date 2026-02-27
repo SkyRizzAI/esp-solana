@@ -496,6 +496,11 @@ pub const SE05X_MAX_ACCOUNTS: usize = 8;
 /// let signer = wallet.signer(0)?;
 /// let tx = Transaction::sign(msg, &[&signer])?;
 /// ```
+/// Interior mutability via `UnsafeCell` allows the [`Signer`] trait
+/// (which takes `&self`) to perform I²C transactions. `RefCell` is
+/// avoided because it is not available in `core` on all targets, and
+/// the runtime borrow-check overhead is unnecessary on single-threaded
+/// bare-metal targets, which is the intended use case.
 pub struct Se05xWallet<I2C> {
     inner: core::cell::UnsafeCell<Se05xInner<I2C>>,
     base_id: u32,
@@ -529,6 +534,11 @@ where
         self
     }
 
+    /// Get a mutable reference to the inner state.
+    ///
+    /// SAFETY: must only be called from a single-threaded context.
+    /// The wallet is intended for bare-metal embedded use where only
+    /// one thread of execution exists.
     fn inner_mut(&self) -> &mut Se05xInner<I2C> {
         unsafe { &mut *self.inner.get() }
     }
