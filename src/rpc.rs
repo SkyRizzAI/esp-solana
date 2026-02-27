@@ -62,6 +62,52 @@ impl<'a, C: RpcClient> SolanaRpc<'a, C> {
         let body = json_get_account_info(&pk_b58);
         self.client.post_json(self.url, &body)
     }
+
+    /// Request an airdrop of `lamports` to a public key (devnet/testnet only).
+    ///
+    /// Returns the transaction signature string.
+    pub fn request_airdrop(&self, pubkey: &Pubkey, lamports: u64) -> Result<String> {
+        let pk_b58 = crate::bs58::encode(&pubkey.0);
+        let body = json_request_airdrop(&pk_b58, lamports);
+        let resp = self.client.post_json(self.url, &body)?;
+        parse_string_result(&resp)
+    }
+
+    /// Get the confirmation status of a transaction signature.
+    ///
+    /// Returns one of: `"processed"`, `"confirmed"`, `"finalized"`,
+    /// or `Err` if not found or RPC error.
+    pub fn get_signature_status(&self, signature: &str) -> Result<String> {
+        let body = json_get_signature_statuses(signature);
+        let resp = self.client.post_json(self.url, &body)?;
+        parse_confirmation_status(&resp)
+    }
+
+    /// Get detailed transaction info as raw JSON.
+    ///
+    /// Returns the full JSON response for the given transaction signature.
+    /// Use this to inspect transaction details (accounts, instructions, logs, etc.).
+    pub fn get_transaction(&self, signature: &str) -> Result<String> {
+        let body = json_get_transaction(signature);
+        self.client.post_json(self.url, &body)
+    }
+
+    /// Poll until a transaction is confirmed (or timeout).
+    ///
+    /// `max_retries`: how many times to poll (each with ~2s delay via caller).
+    /// Returns `true` if confirmed/finalized, `false` if still pending after retries.
+    ///
+    /// **Note:** This method does NOT sleep. The caller should sleep between calls.
+    /// Use `confirm_transaction_with_sleep` (std only) for automatic polling.
+    pub fn check_confirmation(&self, signature: &str) -> Result<bool> {
+        match self.get_signature_status(signature) {
+            Ok(status) => {
+                Ok(status == "confirmed" || status == "finalized")
+            }
+            Err(SdkError::Deserialize) => Ok(false), // not found yet
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ─── JSON-RPC Request Builders ───────────────────────────────
@@ -94,6 +140,30 @@ pub fn json_get_account_info(pubkey_b58: &str) -> String {
     format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["{}",{{"encoding":"base64"}}]}}"#,
         pubkey_b58
+    )
+}
+
+/// Build JSON-RPC request for `requestAirdrop`.
+pub fn json_request_airdrop(pubkey_b58: &str, lamports: u64) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"requestAirdrop","params":["{}",{}]}}"#,
+        pubkey_b58, lamports
+    )
+}
+
+/// Build JSON-RPC request for `getSignatureStatuses`.
+pub fn json_get_signature_statuses(signature: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[["{}"],{{"searchTransactionHistory":true}}]}}"#,
+        signature
+    )
+}
+
+/// Build JSON-RPC request for `getTransaction`.
+pub fn json_get_transaction(signature: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["{}",{{"encoding":"json","maxSupportedTransactionVersion":0}}]}}"#,
+        signature
     )
 }
 
@@ -227,6 +297,34 @@ fn parse_u64(s: &str) -> Result<u64> {
     Ok(result)
 }
 
+/// Parse `getSignatureStatuses` response to extract confirmation status.
+///
+/// Returns "processed", "confirmed", or "finalized".
+/// Returns `Err(Deserialize)` if the status is null (not found).
+pub fn parse_confirmation_status(json: &str) -> Result<String> {
+    if let Some(err) = extract_rpc_error(json) {
+        return Err(err);
+    }
+
+    // The response has "value":[{...,"confirmationStatus":"finalized"}] or "value":[null]
+    let val_key = "\"value\"";
+    let val_pos = json.find(val_key).ok_or(SdkError::Deserialize)?;
+    let after_val = &json[val_pos..];
+
+    // Check for null inside the array
+    if let Some(bracket_pos) = after_val.find('[') {
+        let inside = &after_val[bracket_pos + 1..];
+        let trimmed = inside.trim_start();
+        if trimmed.starts_with("null") {
+            return Err(SdkError::Deserialize); // tx not found
+        }
+    }
+
+    // Extract confirmationStatus
+    let status = extract_string_value(json, "confirmationStatus")?;
+    Ok(String::from(status))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +427,82 @@ mod tests {
         let rpc = SolanaRpc::new("http://localhost:8899", client);
         let balance = rpc.get_balance(&Pubkey::new([1u8; 32])).unwrap();
         assert_eq!(balance, 5_000_000_000);
+    }
+
+    #[test]
+    fn json_request_airdrop_valid() {
+        let s = json_request_airdrop("11111111111111111111111111111111", 1_000_000_000);
+        assert!(s.contains("requestAirdrop"));
+        assert!(s.contains("1000000000"));
+    }
+
+    #[test]
+    fn json_get_signature_statuses_valid() {
+        let s = json_get_signature_statuses("5VERv8NMhbf3stL");
+        assert!(s.contains("getSignatureStatuses"));
+        assert!(s.contains("5VERv8NMhbf3stL"));
+        assert!(s.contains("searchTransactionHistory"));
+    }
+
+    #[test]
+    fn json_get_transaction_valid() {
+        let s = json_get_transaction("5VERv8NMhbf3stL");
+        assert!(s.contains("getTransaction"));
+        assert!(s.contains("maxSupportedTransactionVersion"));
+    }
+
+    #[test]
+    fn parse_confirmation_finalized() {
+        let json = r#"{"jsonrpc":"2.0","result":{"context":{"slot":123},"value":[{"slot":456,"confirmations":null,"err":null,"confirmationStatus":"finalized"}]},"id":1}"#;
+        let status = parse_confirmation_status(json).unwrap();
+        assert_eq!(status, "finalized");
+    }
+
+    #[test]
+    fn parse_confirmation_confirmed() {
+        let json = r#"{"jsonrpc":"2.0","result":{"context":{"slot":123},"value":[{"slot":456,"confirmations":10,"err":null,"confirmationStatus":"confirmed"}]},"id":1}"#;
+        let status = parse_confirmation_status(json).unwrap();
+        assert_eq!(status, "confirmed");
+    }
+
+    #[test]
+    fn parse_confirmation_null_not_found() {
+        let json = r#"{"jsonrpc":"2.0","result":{"context":{"slot":123},"value":[null]},"id":1}"#;
+        assert!(parse_confirmation_status(json).is_err());
+    }
+
+    #[test]
+    fn parse_confirmation_with_whitespace() {
+        let json = r#"{"jsonrpc" : "2.0", "result" : {"context" : {"slot" : 123}, "value" : [{"confirmationStatus" : "processed"}]}, "id" : 1}"#;
+        let status = parse_confirmation_status(json).unwrap();
+        assert_eq!(status, "processed");
+    }
+
+    #[test]
+    fn rpc_request_airdrop_mock() {
+        let client = MockClient {
+            response: r#"{"jsonrpc":"2.0","result":"5VERv8NMhbf3stL4VKdZXzK12xJGQRP2WQGLNfgfB2aD","id":1}"#.into(),
+        };
+        let rpc = SolanaRpc::new("http://localhost:8899", client);
+        let sig = rpc.request_airdrop(&Pubkey::new([1u8; 32]), 1_000_000_000).unwrap();
+        assert_eq!(sig, "5VERv8NMhbf3stL4VKdZXzK12xJGQRP2WQGLNfgfB2aD");
+    }
+
+    #[test]
+    fn rpc_check_confirmation_mock() {
+        let client = MockClient {
+            response: r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":[{"confirmationStatus":"finalized"}]},"id":1}"#.into(),
+        };
+        let rpc = SolanaRpc::new("http://localhost:8899", client);
+        assert!(rpc.check_confirmation("somesig").unwrap());
+    }
+
+    #[test]
+    fn rpc_check_confirmation_pending() {
+        let client = MockClient {
+            response: r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":[null]},"id":1}"#.into(),
+        };
+        let rpc = SolanaRpc::new("http://localhost:8899", client);
+        assert!(!rpc.check_confirmation("somesig").unwrap());
     }
 }

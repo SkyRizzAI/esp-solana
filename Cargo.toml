@@ -20,3 +20,4 @@ wallet = ["crypto", "dep:hmac-sha256", "dep:hmac-sha512"]
 std = []
 
 [dev-dependencies]
+ureq = "2"
