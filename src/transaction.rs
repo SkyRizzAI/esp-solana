@@ -40,6 +40,32 @@ impl Transaction {
         Ok(Self { signatures, message })
     }
 
+    /// Create and sign a transaction using the [`Signer`](crate::signer::Signer) trait.
+    ///
+    /// Accepts any combination of software or hardware signers.
+    /// `signers` must be ordered to match the message's required signers:
+    /// `signers[0]` = payer, then any additional signers in account_keys order.
+    pub fn sign(message: Message, signers: &[&dyn crate::signer::Signer]) -> Result<Self> {
+        let expected = message.header.num_required_signatures as usize;
+        if signers.len() != expected {
+            return Err(SdkError::Invalid);
+        }
+
+        for (i, s) in signers.iter().enumerate() {
+            if s.pubkey() != message.account_keys[i] {
+                return Err(SdkError::Crypto);
+            }
+        }
+
+        let msg_bytes = message.serialize();
+        let mut signatures = Vec::with_capacity(expected);
+        for s in signers {
+            signatures.push(s.sign(&msg_bytes)?);
+        }
+
+        Ok(Self { signatures, message })
+    }
+
     /// Create a transaction with pre-computed signatures (for when crypto feature is off
     /// or signatures are computed externally).
     pub fn new_with_signatures(message: Message, signatures: Vec<Signature>) -> Result<Self> {
@@ -135,5 +161,24 @@ mod tests {
         // 0 signatures when 1 is required
         let result = Transaction::new_with_signatures(msg, alloc::vec![]);
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn sign_with_signer_trait() {
+        use crate::signer::Signer;
+
+        let kp = crate::crypto::Keypair::from_seed(&[42u8; 32]).unwrap();
+        let payer = kp.pubkey();
+        let to = Pubkey::new([2u8; 32]);
+        let blockhash = Hash::new([0xCC; 32]);
+
+        let ix = system_transfer(payer, to, 1_000_000);
+        let msg = Message::compile(payer, &[ix], blockhash).unwrap();
+        let tx = Transaction::sign(msg, &[&kp as &dyn Signer]).unwrap();
+
+        // Verify the signature is valid
+        let msg_bytes = tx.message.serialize();
+        assert!(crate::crypto::verify(&payer, &msg_bytes, &tx.signatures[0]));
     }
 }

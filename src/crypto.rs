@@ -55,6 +55,16 @@ impl Keypair {
     }
 }
 
+impl crate::signer::Signer for Keypair {
+    fn pubkey(&self) -> Pubkey {
+        self.pubkey()
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<Signature> {
+        Ok(self.sign(message))
+    }
+}
+
 /// Verify an Ed25519 signature against a message and public key.
 pub fn verify(pubkey: &Pubkey, message: &[u8], signature: &Signature) -> bool {
     let pk = match ed25519_compact::PublicKey::from_slice(&pubkey.0) {

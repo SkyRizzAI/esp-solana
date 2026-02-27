@@ -30,6 +30,7 @@
 //!
 //! - **`crypto`** (default) — Ed25519 signing via `ed25519-compact`
 //! - **`wallet`** — BIP39 mnemonic + SLIP-10 key derivation (enables `crypto`)
+//! - **`se05x`** — NXP SE05x secure element driver via `embedded-hal` I²C
 //! - **`std`** — enables std for host-side testing
 
 #![no_std]
@@ -44,10 +45,15 @@ pub mod instruction;
 pub mod message;
 pub mod transaction;
 pub mod rpc;
+pub mod signer;
 
 #[cfg(feature = "crypto")]
 #[cfg_attr(docsrs, doc(cfg(feature = "crypto")))]
 pub mod crypto;
+
+#[cfg(feature = "se05x")]
+#[cfg_attr(docsrs, doc(cfg(feature = "se05x")))]
+pub mod se05x;
 
 #[cfg(feature = "wallet")]
 #[cfg_attr(docsrs, doc(cfg(feature = "wallet")))]
@@ -75,6 +81,7 @@ pub mod prelude {
     pub use crate::message::Message;
     pub use crate::transaction::Transaction;
     pub use crate::rpc::{RpcClient, SolanaRpc};
+    pub use crate::signer::Signer;
 
     #[cfg(feature = "crypto")]
     pub use crate::crypto::Keypair;
@@ -84,4 +91,7 @@ pub mod prelude {
 
     #[cfg(feature = "wallet")]
     pub use crate::bip39::Mnemonic;
+
+    #[cfg(feature = "se05x")]
+    pub use crate::se05x::Se05xSigner;
 }

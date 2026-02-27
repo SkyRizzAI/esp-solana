@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [package.metadata.docs.rs]
-features = ["wallet"]
+features = ["wallet", "se05x"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -28,11 +28,13 @@ crate-type = ["rlib"]
 ed25519-compact = { version = "2.1", default-features = false, optional = true }
 hmac-sha256 = { version = "1.1", default-features = false, optional = true }
 hmac-sha512 = { version = "1.1", default-features = false, optional = true }
+embedded-hal = { version = "1.0", default-features = false, optional = true }
 
 [features]
 default = ["crypto"]
 crypto = ["dep:ed25519-compact"]
 wallet = ["crypto", "dep:hmac-sha256", "dep:hmac-sha512"]
+se05x = ["dep:embedded-hal"]
 std = []
 
 [dev-dependencies]

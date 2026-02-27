@@ -108,6 +108,38 @@ espflash flash target/riscv32imc-unknown-none-elf/release/esp32c3-solana-demo --
 
 Out of 4MB. Use `lto = 'fat'` and `opt-level = 's'` in your release profile.
 
+## NXP SE05x Secure Element
+
+Hardware-backed key storage and signing via the NXP SE05x over I²C.
+Private keys never leave the secure element.
+
+```toml
+[dependencies]
+esp-solana = { git = "https://github.com/SkyRizzAI/esp-solana", features = ["se05x"] }
+```
+
+```rust
+use esp_solana::se05x::Se05xSigner;
+use esp_solana::signer::Signer;
+use esp_solana::transaction::Transaction;
+
+// `i2c` implements `embedded_hal::i2c::I2c`
+let mut se = Se05xSigner::new(i2c, 0x0001_0001);
+se.generate_ed25519().unwrap(); // one-time key generation
+
+let pubkey = se.pubkey();
+let ix = system_transfer(pubkey, recipient, 1_000_000);
+let msg = Message::compile(pubkey, &[ix], blockhash).unwrap();
+let tx = Transaction::sign(msg, &[&se]).unwrap();
+let b64 = tx.to_base64();
+```
+
+The `Signer` trait lets you mix software and hardware signers in the same transaction:
+
+```rust
+let tx = Transaction::sign(msg, &[&se05x_signer as &dyn Signer]).unwrap();
+```
+
 ## License
 
 MIT
