@@ -1,8 +1,8 @@
 # esp-solana
 
-A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, build messages, read on-chain state, and submit RPC requests — all from bare-metal Rust.
+A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, build messages, read on-chain state, manage wallets, and submit RPC requests — all from bare-metal Rust.
 
-**146 KB** release binary. **One** optional dependency (`ed25519-compact`). **Zero** hardware dependencies — bring your own networking.
+**~580 KB** release binary (with wallet). **Three** optional dependencies. **Zero** hardware dependencies — bring your own networking.
 
 ## Features
 
@@ -10,6 +10,7 @@ A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, bu
 |---------|-------------|
 | **Ed25519 signing** | Keypair generation, transaction signing, signature verification |
 | **Transaction building** | Compile instructions → Solana wire format, exact byte-level compatibility |
+| **Wallet management** | BIP39 mnemonic generation/validation, SLIP-10 HD key derivation, multi-account |
 | **RPC client** | Transport-agnostic JSON-RPC for `getLatestBlockhash`, `sendTransaction`, `getBalance`, `getAccountInfo` |
 | **Base58 / Base64** | Built-in codecs, no external dependencies |
 | **System program** | SOL transfer instruction builder |
@@ -21,7 +22,35 @@ A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, bu
 ```toml
 # Cargo.toml
 [dependencies]
-esp-solana = { git = "https://github.com/youruser/esp-solana", features = ["crypto"] }
+# Full SDK with wallet support
+esp-solana = { git = "https://github.com/SkyRizzAI/esp-solana", features = ["wallet"] }
+
+# Or just crypto (no wallet/mnemonic)
+# esp-solana = { git = "https://github.com/SkyRizzAI/esp-solana", features = ["crypto"] }
+```
+
+### Create and manage a wallet
+
+```rust
+use esp_solana::wallet::Wallet;
+
+// Generate a new wallet from hardware RNG entropy (16 bytes = 12-word mnemonic)
+let entropy: [u8; 16] = get_entropy_from_hw_rng(); // ESP32 hardware RNG
+let wallet = Wallet::generate_12(&entropy).unwrap();
+
+// Save the mnemonic phrase (back it up securely!)
+let mnemonic = wallet.mnemonic(); // "word1 word2 ... word12"
+
+// Restore a wallet from mnemonic
+let restored = Wallet::from_mnemonic(mnemonic).unwrap();
+
+// Derive keypairs for multiple accounts
+let keypair_0 = wallet.keypair(0).unwrap(); // Default account
+let keypair_1 = wallet.keypair(1).unwrap(); // Second account
+
+// Get addresses
+let address = wallet.default_pubkey().unwrap();
+println!("Address: {}", address);
 ```
 
 ### Build and sign a SOL transfer
@@ -87,6 +116,9 @@ esp-solana (pure library, no hardware deps)
 ├── bs58       Base58 encode/decode (built-in)
 ├── b64        Base64 encode/decode (built-in)
 ├── crypto     Ed25519 via ed25519-compact [feature: "crypto"]
+├── wallet     Wallet struct, generate/restore/derive [feature: "wallet"]
+├── bip39      BIP39 mnemonic + PBKDF2 seed derivation [feature: "wallet"]
+├── slip10     SLIP-10 Ed25519 HD key derivation [feature: "wallet"]
 ├── instruction  System program builders
 ├── message    Compile & serialize to Solana wire format
 ├── transaction  Sign + serialize full transactions
@@ -135,7 +167,7 @@ runner = "espflash flash --monitor"
 **Cargo.toml:**
 ```toml
 [dependencies]
-esp-solana = { path = "../esp-solana", features = ["crypto"] }
+esp-solana = { path = "../esp-solana", features = ["wallet"] }
 esp-hal = { version = "0.23", features = ["esp32c3"] }
 esp-wifi = { version = "0.13", features = ["esp32c3", "wifi"] }
 esp-alloc = "0.7"
@@ -147,7 +179,7 @@ esp-println = { version = "0.13", features = ["esp32c3", "log"] }
 ESP32-C3 needs a heap allocator for `alloc`. Add this to your `main()`:
 
 ```rust
-const HEAP_SIZE: usize = 65536; // 64KB is plenty for Solana
+const HEAP_SIZE: usize = 131072; // 128KB for wallet + transactions
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 unsafe {
     esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
@@ -185,7 +217,11 @@ impl RpcClient for EspHttpClient {
 ### Host demo (runs on your computer)
 
 ```bash
+# Transaction demo
 cargo run --example host_demo --features crypto
+
+# Full demo with wallet
+cargo run --example host_demo --features wallet
 ```
 
 Output:
@@ -222,6 +258,7 @@ espflash flash target/riscv32imc-unknown-none-elf/release/esp32c3-demo --monitor
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `crypto` | ✅ | Ed25519 signing via `ed25519-compact` |
+| `wallet` | ❌ | BIP39 mnemonic + SLIP-10 key derivation (enables `crypto`) |
 | `std` | ❌ | Enable std (for host-side testing) |
 
 ### Minimal build (no crypto)
@@ -248,6 +285,29 @@ Use `Transaction::new_with_signatures()` to attach pre-computed signatures.
 - `Keypair::pubkey()` → `Pubkey`
 - `Keypair::sign(&[u8])` → `Signature`
 - `verify(&Pubkey, &[u8], &Signature)` → `bool`
+
+### `wallet` (feature: `wallet`)
+- `Wallet::generate_12(&[u8; 16])` — new 12-word wallet from entropy
+- `Wallet::generate_24(&[u8; 32])` — new 24-word wallet from entropy
+- `Wallet::from_mnemonic(phrase)` — restore from mnemonic string
+- `Wallet::from_mnemonic_with_passphrase(phrase, pass)` — restore with BIP39 passphrase
+- `Wallet::mnemonic()` → `&str` — the mnemonic phrase
+- `Wallet::keypair(account)` → `Result<Keypair>` — derive keypair at `m/44'/501'/account'/0'`
+- `Wallet::pubkey(account)` → `Result<Pubkey>` — derive address
+- `Wallet::default_pubkey()` → `Result<Pubkey>` — account 0 address
+- `Wallet::seed()` → `&[u8; 64]` — raw BIP39 seed bytes
+
+### `bip39` (feature: `wallet`)
+- `Mnemonic::from_entropy_128(&[u8; 16])` — 12-word mnemonic from entropy
+- `Mnemonic::from_entropy_256(&[u8; 32])` — 24-word mnemonic from entropy
+- `Mnemonic::from_phrase(phrase)` — parse and validate mnemonic
+- `Mnemonic::derive_seed(passphrase)` → `[u8; 64]` — PBKDF2-HMAC-SHA512
+
+### `slip10` (feature: `wallet`)
+- `DerivedKey::master(&[u8; 64])` — master key from BIP39 seed
+- `DerivedKey::derive_child(index)` — hardened child derivation
+- `DerivedKey::derive_solana_path(seed, account, change)` — full `m/44'/501'/account'/change'`
+- `DerivedKey::to_keypair()` → `Result<Keypair>` — convert to signing keypair
 
 ### `instruction`
 - `system_transfer(from, to, lamports)` → `Instruction`
@@ -283,15 +343,19 @@ Use `Transaction::new_with_signatures()` to attach pre-computed signatures.
 
 | Config | Size |
 |--------|------|
-| Release rlib (`crypto` on) | ~146 KB |
+| Release rlib (`wallet` on) | ~580 KB |
+| Release rlib (`crypto` only) | ~160 KB |
 | Release rlib (no crypto) | ~30 KB |
 
 ## Security Notes
 
 - **Never hardcode mainnet private keys** in firmware. Use secure key storage (eFuse, secure element, or encrypted flash).
+- **Protect mnemonic phrases** — store encrypted in NVS (Non-Volatile Storage) or secure element. Never log or transmit mnemonics.
 - **Use HTTPS** (TLS) for RPC connections to prevent MITM attacks on transaction submission.
+- **Use hardware RNG** for wallet entropy — ESP32's `esp_random()` via `esp-hal` provides true random numbers.
 - **Devnet only** for development. Test thoroughly before mainnet deployment.
+- **PBKDF2 is slow on ESP32** (~1-3 seconds for 2048 iterations) — this is expected and provides brute-force resistance.
 
 ## License
 
-MIT OR Apache-2.0
+MIT

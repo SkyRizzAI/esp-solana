@@ -1,7 +1,7 @@
 //! Host-side demo: build and sign a SOL transfer transaction.
 //!
-//! Run: `cargo test --example host_demo --features crypto`
-//! (This is a runnable test, not an actual RPC call.)
+//! Run: `cargo run --example host_demo --features crypto`
+//! With wallet: `cargo run --example host_demo --features wallet`
 
 extern crate alloc;
 
@@ -91,4 +91,51 @@ fn main() {
     println!("Wire size:    {} bytes", wire_bytes.len());
 
     println!("\n=== Demo complete ===");
+
+    #[cfg(feature = "wallet")]
+    wallet_demo();
+}
+
+/// Wallet demo (requires `wallet` feature).
+/// Run: `cargo run --example host_demo --features wallet`
+#[cfg(feature = "wallet")]
+fn wallet_demo() {
+    use esp_solana::wallet::Wallet;
+
+    println!("\n=== Wallet Demo ===\n");
+
+    // 1. Generate a new wallet from entropy
+    let entropy = [0x42u8; 16]; // In real code, use hardware RNG!
+    let wallet = Wallet::generate_12(&entropy).unwrap();
+    println!("New wallet created!");
+    println!("Mnemonic:     {}", wallet.mnemonic());
+    println!("Word count:   {}", wallet.word_count());
+
+    // 2. Derive multiple accounts
+    for i in 0..3 {
+        let pubkey = wallet.pubkey(i).unwrap();
+        println!("Account #{}: {}", i, pubkey);
+    }
+
+    // 3. Restore from mnemonic
+    let restored = Wallet::from_mnemonic(wallet.mnemonic()).unwrap();
+    let pk_original = wallet.pubkey(0).unwrap();
+    let pk_restored = restored.pubkey(0).unwrap();
+    assert_eq!(pk_original.as_bytes(), pk_restored.as_bytes());
+    println!("\nRestore verified: same address after recovery");
+
+    // 4. Use wallet keypair to sign a transaction
+    let kp = wallet.keypair(0).unwrap();
+    let msg = b"hello from wallet";
+    let sig = kp.sign(msg);
+    let valid = esp_solana::crypto::verify(&kp.pubkey(), msg, &sig);
+    println!("Sign & verify: {}", valid);
+
+    // 5. Validate a known mnemonic
+    let known = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let w = Wallet::from_mnemonic(known).unwrap();
+    println!("\nKnown mnemonic test:");
+    println!("Address:      {}", w.default_pubkey().unwrap());
+
+    println!("\n=== Wallet Demo complete ===");
 }

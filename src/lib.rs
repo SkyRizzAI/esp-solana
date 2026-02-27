@@ -15,6 +15,22 @@ pub mod rpc;
 #[cfg_attr(docsrs, doc(cfg(feature = "crypto")))]
 pub mod crypto;
 
+#[cfg(feature = "wallet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wallet")))]
+mod wordlist;
+
+#[cfg(feature = "wallet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wallet")))]
+pub mod bip39;
+
+#[cfg(feature = "wallet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wallet")))]
+pub mod slip10;
+
+#[cfg(feature = "wallet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "wallet")))]
+pub mod wallet;
+
 /// Curated re-exports for common use.
 /// `use esp_solana::prelude::*;`
 pub mod prelude {
@@ -28,4 +44,10 @@ pub mod prelude {
 
     #[cfg(feature = "crypto")]
     pub use crate::crypto::Keypair;
+
+    #[cfg(feature = "wallet")]
+    pub use crate::wallet::Wallet;
+
+    #[cfg(feature = "wallet")]
+    pub use crate::bip39::Mnemonic;
 }

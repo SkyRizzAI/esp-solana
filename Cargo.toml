@@ -1,7 +1,7 @@
 [package]
 name = "esp-solana"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "Compact no_std Solana SDK for ESP32 microcontrollers"
 license = "MIT"
 
@@ -10,10 +10,13 @@ crate-type = ["rlib"]
 
 [dependencies]
 ed25519-compact = { version = "2.1", default-features = false, optional = true }
+hmac-sha256 = { version = "1.1", default-features = false, optional = true }
+hmac-sha512 = { version = "1.1", default-features = false, optional = true }
 
 [features]
 default = ["crypto"]
 crypto = ["dep:ed25519-compact"]
+wallet = ["crypto", "dep:hmac-sha256", "dep:hmac-sha512"]
 std = []
 
 [dev-dependencies]
