@@ -138,6 +138,15 @@ impl core::fmt::Debug for Wallet {
     }
 }
 
+/// Zero the 64-byte BIP39 seed on drop.
+impl Drop for Wallet {
+    fn drop(&mut self) {
+        for b in self.seed.iter_mut() {
+            unsafe { core::ptr::write_volatile(b, 0) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

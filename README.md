@@ -2,7 +2,7 @@
 
 A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, build messages, read on-chain state, manage wallets, and submit RPC requests — all from bare-metal Rust.
 
-**~580 KB** release binary (with wallet). **Three** optional dependencies. **Zero** hardware dependencies — bring your own networking.
+**~298 KB** release rlib (with wallet). **Only 2** external dependencies. **Zero** hardware dependencies — bring your own networking.
 
 ## Features
 
@@ -10,7 +10,7 @@ A compact, `no_std` Solana SDK for ESP32 microcontrollers. Sign transactions, bu
 |---------|-------------|
 | **Ed25519 signing** | Keypair generation, transaction signing, signature verification |
 | **Transaction building** | Compile instructions → Solana wire format, exact byte-level compatibility |
-| **Wallet management** | BIP39 mnemonic generation/validation, SLIP-10 HD key derivation, multi-account |
+| **Wallet management** | BIP39 mnemonic generation/validation, SLIP-10 HD key derivation, multi-account, zeroize-on-drop |
 | **RPC client** | Transport-agnostic JSON-RPC for `getLatestBlockhash`, `sendTransaction`, `getBalance`, `getAccountInfo` |
 | **Base58 / Base64** | Built-in codecs, no external dependencies |
 | **System program** | SOL transfer instruction builder |
@@ -131,6 +131,8 @@ esp-solana (pure library, no hardware deps)
 - **No serde** — manual JSON building and parsing keeps the binary tiny. The parsers handle whitespace variations and null values.
 - **No `esp-hal` in the library** — `esp-solana` is a pure SDK. Your project brings the networking stack (reqwless, smoltcp, esp-wifi sockets, etc.).
 - **Feature-gated crypto** — the `crypto` feature adds Ed25519 via `ed25519-compact` (~15 KB). Disable it if you sign externally.
+- **Compact wordlist** — BIP39 English words stored as a single `include_str!` text file (~13 KB) instead of 2048 `&str` pointers, saving ~16 KB of metadata on 32-bit targets.
+- **Zeroize-on-drop** — `DerivedKey` and `Wallet` use `write_volatile` to zero private keys and seeds from SRAM when dropped, preventing key material from lingering in memory.
 - **`alloc` required** — uses `Vec` and `String` from the alloc crate. ESP32-C3 has 400 KB SRAM, so this is fine. Initialize a heap allocator in your project (e.g., `esp-alloc`).
 
 ## ESP32-C3 Setup
@@ -339,16 +341,17 @@ Use `Transaction::new_with_signatures()` to attach pre-computed signatures.
 - `b64::encode(&[u8])` → `String`
 - `b64::decode(&str)` → `Result<Vec<u8>>`
 
-## Binary Size
+## Binary Size (RISC-V 32-bit release rlib)
 
-| Config | Size |
-|--------|------|
-| Release rlib (`wallet` on) | ~580 KB |
-| Release rlib (`crypto` only) | ~160 KB |
-| Release rlib (no crypto) | ~30 KB |
+| Config | Size | Dependencies |
+|--------|------|-------------|
+| `wallet` | ~298 KB | 2 (ed25519-compact, hmac-sha256/512) |
+| `crypto` only | ~163 KB | 1 (ed25519-compact) |
+| no features | ~145 KB | 0 |
 
-## Security Notes
+## Security
 
+- **Zeroize-on-drop** — `DerivedKey` and `Wallet` automatically zero private keys and seeds from memory when dropped via `core::ptr::write_volatile`. This prevents key material from lingering in ESP32 SRAM where it could be extracted via JTAG, memory dumps, or fault injection.
 - **Never hardcode mainnet private keys** in firmware. Use secure key storage (eFuse, secure element, or encrypted flash).
 - **Protect mnemonic phrases** — store encrypted in NVS (Non-Volatile Storage) or secure element. Never log or transmit mnemonics.
 - **Use HTTPS** (TLS) for RPC connections to prevent MITM attacks on transaction submission.

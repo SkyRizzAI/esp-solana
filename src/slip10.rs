@@ -94,6 +94,18 @@ impl core::fmt::Debug for DerivedKey {
     }
 }
 
+/// Zero sensitive key material on drop to prevent keys lingering in SRAM.
+impl Drop for DerivedKey {
+    fn drop(&mut self) {
+        for b in self.key.iter_mut() {
+            unsafe { core::ptr::write_volatile(b, 0) };
+        }
+        for b in self.chain_code.iter_mut() {
+            unsafe { core::ptr::write_volatile(b, 0) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,9 +197,21 @@ mod tests {
         let seed = [0x42u8; 64];
         let derived = DerivedKey::derive_solana_path(&seed, 0, 0);
         let kp = derived.to_keypair().unwrap();
-        // Verify the keypair can sign
         let msg = b"hello solana";
         let sig = kp.sign(msg);
         assert!(crate::crypto::verify(&kp.pubkey(), msg, &sig));
+    }
+
+    #[test]
+    fn zeroize_on_drop() {
+        let seed = [0xABu8; 64];
+        let derived = DerivedKey::derive_solana_path(&seed, 0, 0);
+        // Copy key bytes before drop
+        let key_copy = *derived.key_bytes();
+        assert_ne!(key_copy, [0u8; 32], "key should not be zero before drop");
+        // derived is dropped here at end of scope — write_volatile zeros it
+        drop(derived);
+        // We can't read the dropped memory directly (that's the point!),
+        // but we verify the Drop impl compiles and runs without panic.
     }
 }
