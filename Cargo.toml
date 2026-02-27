@@ -4,6 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "Compact no_std Solana SDK for ESP32 microcontrollers"
 license = "MIT"
+repository = "https://github.com/SkyRizzAI/esp-solana"
+keywords = ["solana", "esp32", "no-std", "embedded", "blockchain"]
+categories = ["no-std", "embedded", "cryptography"]
+readme = "README.md"
+exclude = [
+    "examples/",
+    "docs/",
+    "target/",
+    ".github/",
+]
 
 [lib]
 crate-type = ["rlib"]
